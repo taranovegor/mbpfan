@@ -1,0 +1,23 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: make bin/mbpfan
+      - run: |
+          cp bin/mbpfan mbpfan-linux-amd64
+          sha256sum mbpfan-linux-amd64 > mbpfan-linux-amd64.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mbpfan-linux-amd64
+            mbpfan-linux-amd64.sha256

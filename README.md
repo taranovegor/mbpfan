@@ -1,6 +1,6 @@
 # mbpfan
 
-[![Build Status](https://travis-ci.org/dgraziotin/mbpfan.svg?branch=master)](https://travis-ci.org/dgraziotin/mbpfan)
+[![Build](https://github.com/taranovegor/mbpfan/actions/workflows/build.yml/badge.svg)](https://github.com/taranovegor/mbpfan/actions/workflows/build.yml)
 
 This is an enhanced version of [Allan McRae mbpfan](http://allanmcrae.com/2010/05/simple-macbook-pro-fan-daemon/)
 
