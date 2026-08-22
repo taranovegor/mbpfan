@@ -20,6 +20,8 @@ static const char *test_settings(void);
 static void handler(int signal);
 static const char *test_sighup_receive(void);
 static const char *test_settings_reload(void);
+static const char *test_curve_interpolate(void);
+static const char *test_parse_curve(void);
 static const char *all_tests(void);
 
 int tests(const char *program_path);

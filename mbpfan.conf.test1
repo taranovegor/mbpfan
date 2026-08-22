@@ -1,7 +1,11 @@
 [general]
 min_fan1_speed = 2000	# default is 2000
 max_fan1_speed = 2600	# default is 2600
-low_temp = 63			# try ranges 55-63, default is 63
-high_temp = 66			# try ranges 58-66, default is 66
-max_temp = 86			# do not set it > 90, default is 86
 polling_interval = 2	# default is 1 second
+
+up_rate = 400
+down_rate = 700
+temp_alpha_percent = 15
+hard_max_temp = 100
+hard_max_hold = 2
+curve = 60:30,90:80,100:100

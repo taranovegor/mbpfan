@@ -21,18 +21,53 @@
 
 #include "global.h"
 
-/** Temperature Thresholds
- *  low_temp - temperature below which fan speed will be at minimum
- *  high_temp - fan will increase speed when higher than this temperature
- *  max_temp - fan will run at full speed above this temperature */
-extern int low_temp;
-extern int high_temp;
-extern int max_temp;
-
 /** Temperature polling interval
  *  Default value was 10 (seconds)
  */
 extern int polling_interval;
+
+/**
+ * Multi-point curve mapping temp_c to fan speed percent, linearly
+ * interpolated and clamped at the ends
+ */
+#define MAX_CURVE_POINTS 16
+
+typedef struct {
+    int temp_c;
+    int percent;
+} t_curve_point;
+
+extern t_curve_point curve[MAX_CURVE_POINTS];
+extern int curve_count;
+
+/**
+ * Linearly interpolates the temp_c -> percent curve, clamped at the ends
+ */
+int curve_interpolate(double temp);
+
+/**
+ * Parses "temp:percent,temp:percent,..." into the curve array;
+ * keeps the existing curve untouched on any parse error
+ */
+void parse_curve(const char *str);
+
+/**
+ * Max rpm change per second in each direction (asymmetric slew)
+ */
+extern int up_rate;
+extern int down_rate;
+
+/**
+ * EMA weight of a new temperature reading, in percent (0-100)
+ */
+extern int temp_alpha_percent;
+
+/**
+ * Emergency threshold in degrees: after hard_max_hold consecutive
+ * readings at or above hard_max_temp, the fan jumps straight to max speed
+ */
+extern int hard_max_temp;
+extern int hard_max_hold;
 
 char *smprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

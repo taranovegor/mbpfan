@@ -16,6 +16,7 @@ This enhanced version assumes any number of processors and fans (max. 10).
 
 **Table Of Contents**
 
+- [Fork Differences from Upstream](#fork-differences-from-upstream)
 - [Supported GNU/Linux Distributions](#supported-gnulinux-distributions)
 - [Tested Mac Models](#tested-mac-models)
 - [Requirements](#requirements)
@@ -34,6 +35,18 @@ This enhanced version assumes any number of processors and fans (max. 10).
 - [References](#references)
 - [License](#license)
 - [Credits](#credits)
+
+## Fork Differences from Upstream
+
+This fork replaces the `low_temp`/`high_temp`/`max_temp` linear ramp with a different control algorithm:
+
+* EMA-smoothed temperature reading (avoids fan hunting on short load bursts)
+* multi-point `curve` config option (`temp_c:percent` pairs, linearly interpolated) instead of three fixed thresholds
+* asymmetric slew rate limiting (`up_rate`/`down_rate`) so the fan ramps toward the target instead of snapping to it
+* emergency slam to 100% if the raw (unsmoothed) temperature stays at or above `hard_max_temp` for `hard_max_hold` consecutive polls
+* re-asserts manual fan control every poll (survives suspend/resume dropping it back to auto)
+
+New `/etc/mbpfan.conf` keys: `up_rate`, `down_rate`, `temp_alpha_percent`, `hard_max_temp`, `hard_max_hold`, `curve`. The `low_temp`/`high_temp`/`max_temp` keys are gone - see [mbpfan.conf](mbpfan.conf) for a documented example.
 
 ## Supported GNU/Linux Distributions
 

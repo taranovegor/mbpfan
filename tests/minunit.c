@@ -1,6 +1,7 @@
 /* file minunit_example.c */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <limits.h>
 #include <signal.h>
@@ -140,10 +141,16 @@ static const char *test_config_file()
         return 0;
     }
 
-    mu_assert("Could not read low_temp from config file",settings_get_int(settings, "general", "low_temp") != 0);
-    mu_assert("Could not read high_temp from config file",settings_get_int(settings, "general", "high_temp") != 0);
-    mu_assert("Could not read max_temp from config file",settings_get_int(settings, "general", "max_temp") != 0);
-    mu_assert("Could not read polling_interval from config file",settings_get_int(settings, "general", "polling_interval") != 0);
+    mu_assert("Could not read polling_interval from config file", settings_get_int(settings, "general", "polling_interval") != 0);
+    mu_assert("Could not read up_rate from config file", settings_get_int(settings, "general", "up_rate") != 0);
+    mu_assert("Could not read down_rate from config file", settings_get_int(settings, "general", "down_rate") != 0);
+    mu_assert("Could not read temp_alpha_percent from config file", settings_get_int(settings, "general", "temp_alpha_percent") != 0);
+    mu_assert("Could not read hard_max_temp from config file", settings_get_int(settings, "general", "hard_max_temp") != 0);
+    mu_assert("Could not read hard_max_hold from config file", settings_get_int(settings, "general", "hard_max_hold") != 0);
+
+    char curve_str[512];
+    mu_assert("Could not read curve from config file", settings_get(settings, "general", "curve", curve_str, sizeof(curve_str)));
+
     /* Destroy the settings object */
     settings_delete(settings);
 
@@ -161,6 +168,15 @@ static const char *test_settings()
     // choosing the maximum for iMac mid 2011
     mu_assert("max_fan_speed value is not 2600", fan->fan_max_speed == 2600);
     mu_assert("polling_interval is not 2", polling_interval == 2);
+    mu_assert("up_rate is not 400", up_rate == 400);
+    mu_assert("down_rate is not 700", down_rate == 700);
+    mu_assert("temp_alpha_percent is not 15", temp_alpha_percent == 15);
+    mu_assert("hard_max_temp is not 100", hard_max_temp == 100);
+    mu_assert("hard_max_hold is not 2", hard_max_hold == 2);
+    mu_assert("curve_count is not 3", curve_count == 3);
+    mu_assert("curve[0] wrong", curve[0].temp_c == 60 && curve[0].percent == 30);
+    mu_assert("curve[1] wrong", curve[1].temp_c == 90 && curve[1].percent == 80);
+    mu_assert("curve[2] wrong", curve[2].temp_c == 100 && curve[2].percent == 100);
 
     fan->fan_min_speed = -1;
     retrieve_settings("./mbpfan.conf.test0", fan);
@@ -239,6 +255,55 @@ static const char *test_settings_reload()
 }
 
 
+static const char *test_curve_interpolate()
+{
+    t_curve_point saved[MAX_CURVE_POINTS];
+    int saved_count = curve_count;
+    memcpy(saved, curve, sizeof(t_curve_point) * curve_count);
+
+    curve[0].temp_c = 50;
+    curve[0].percent = 20;
+    curve[1].temp_c = 100;
+    curve[1].percent = 100;
+    curve_count = 2;
+
+    mu_assert("Below range should clamp to first point", curve_interpolate(30) == 20);
+    mu_assert("Exact first point", curve_interpolate(50) == 20);
+    mu_assert("Midpoint should interpolate", curve_interpolate(75) == 60);
+    mu_assert("Exact last point", curve_interpolate(100) == 100);
+    mu_assert("Above range should clamp to last point", curve_interpolate(150) == 100);
+
+    memcpy(curve, saved, sizeof(t_curve_point) * saved_count);
+    curve_count = saved_count;
+    return 0;
+}
+
+static const char *test_parse_curve()
+{
+    t_curve_point saved[MAX_CURVE_POINTS];
+    int saved_count = curve_count;
+    memcpy(saved, curve, sizeof(t_curve_point) * curve_count);
+
+    parse_curve("50:20,75:60,100:100");
+    mu_assert("curve_count should be 3", curve_count == 3);
+    mu_assert("First point wrong", curve[0].temp_c == 50 && curve[0].percent == 20);
+    mu_assert("Second point wrong", curve[1].temp_c == 75 && curve[1].percent == 60);
+    mu_assert("Third point wrong", curve[2].temp_c == 100 && curve[2].percent == 100);
+
+    parse_curve("garbage");
+    mu_assert("Invalid input should keep previous curve", curve_count == 3 && curve[0].temp_c == 50);
+
+    parse_curve("50:20");
+    mu_assert("Single point should be rejected, keeping previous curve", curve_count == 3);
+
+    parse_curve("80:50,50:20");
+    mu_assert("Unsorted points should be rejected, keeping previous curve", curve_count == 3);
+
+    memcpy(curve, saved, sizeof(t_curve_point) * saved_count);
+    curve_count = saved_count;
+    return 0;
+}
+
 static const char *all_tests()
 {
     mu_run_test(test_sensor_paths);
@@ -248,6 +313,8 @@ static const char *all_tests()
     mu_run_test(test_settings);
     mu_run_test(test_sighup_receive);
     mu_run_test(test_settings_reload);
+    mu_run_test(test_curve_interpolate);
+    mu_run_test(test_parse_curve);
     return 0;
 }
 

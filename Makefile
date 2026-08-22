@@ -11,6 +11,7 @@ CONF = mbpfan.conf
 DEPEND_MODULE = mbpfan.depend.conf
 DOC = README.md
 MAN = mbpfan.8.gz
+SERVICE = mbpfan.service
 
 COPT = 
 CC ?= cc
@@ -69,6 +70,7 @@ install: all
 	install -d $(DESTDIR)/lib/modules-load.d
 	install $(BIN) $(DESTDIR)/usr/sbin
 	install -m644 $(CONF) $(DESTDIR)/etc
+	install -m644 $(SERVICE) $(DESTDIR)/lib/systemd/system
 	install -m644 $(DEPEND_MODULE) $(DESTDIR)/lib/modules-load.d
 	install -m644 $(DOC) $(DESTDIR)/usr/share/doc/mbpfan
 	install -d $(DESTDIR)/usr/share/man/man8

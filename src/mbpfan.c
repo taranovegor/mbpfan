@@ -59,13 +59,21 @@
 #define APPLESMC_PATH "/sys/devices/platform/applesmc.768"
 #define ALT_APPLESMC_PATH "/sys/bus/acpi/drivers/applesmc"
 
-/* temperature thresholds
- * low_temp - temperature below which fan speed will be at minimum
- * high_temp - fan will increase speed when higher than this temperature
- * max_temp - fan will run at full speed above this temperature */
-int low_temp = 63;  // try ranges 55-63
-int high_temp = 66; // try ranges 58-66
-int max_temp = 86;  // do not set it > 90
+// default temp_c -> percent curve, linearly interpolated and clamped at the ends
+t_curve_point curve[MAX_CURVE_POINTS] = {
+    {55, 23}, {72, 24}, {80, 31}, {85, 51}, {90, 65}, {95, 83}, {100, 100},
+};
+int curve_count = 7;
+
+int up_rate = 350;   // rpm/s ramping up
+int down_rate = 600; // rpm/s ramping down
+int temp_alpha_percent = 10;
+int hard_max_temp = 103;
+int hard_max_hold = 3;
+
+// EMA-smoothed temperature and the emergency hold counter
+static double ema_temp = -1;
+static int hard_max_counter = 0;
 
 // maximum number of processors etc supported
 #define NUM_PROCESSORS 6
@@ -454,6 +462,76 @@ unsigned short get_temp(t_sensors *sensors)
     return temp / 1000;
 }
 
+// linearly interpolates the temp_c -> percent curve, clamped at the ends
+int curve_interpolate(double temp)
+{
+    if (temp <= curve[0].temp_c) {
+        return curve[0].percent;
+    }
+
+    if (temp >= curve[curve_count - 1].temp_c) {
+        return curve[curve_count - 1].percent;
+    }
+
+    for (int i = 0; i < curve_count - 1; i++) {
+        if (temp >= curve[i].temp_c && temp <= curve[i + 1].temp_c) {
+            double frac = (temp - curve[i].temp_c) / (double)(curve[i + 1].temp_c - curve[i].temp_c);
+            return (int) lround(curve[i].percent + frac * (curve[i + 1].percent - curve[i].percent));
+        }
+    }
+
+    return curve[curve_count - 1].percent; /* unreachable */
+}
+
+// parses "temp:percent,temp:percent,..." into the curve array;
+// keeps the existing curve untouched on any parse error
+void parse_curve(const char *str)
+{
+    t_curve_point parsed[MAX_CURVE_POINTS];
+    int count = 0;
+
+    char *buf = strdup(str);
+    char *saveptr_pair = NULL;
+    char *pair = strtok_r(buf, ",", &saveptr_pair);
+
+    while (pair != NULL) {
+        if (count >= MAX_CURVE_POINTS) {
+            mbp_log(LOG_ERR, "curve has more than %d points, ignoring the rest", MAX_CURVE_POINTS);
+            break;
+        }
+
+        int temp_c, percent;
+        if (sscanf(pair, "%d:%d", &temp_c, &percent) != 2) {
+            mbp_log(LOG_ERR, "Invalid curve point '%s', keeping previous curve", pair);
+            free(buf);
+            return;
+        }
+
+        parsed[count].temp_c = temp_c;
+        parsed[count].percent = percent;
+        count++;
+
+        pair = strtok_r(NULL, ",", &saveptr_pair);
+    }
+
+    free(buf);
+
+    if (count < 2) {
+        mbp_log(LOG_ERR, "curve needs at least 2 points, keeping previous curve");
+        return;
+    }
+
+    for (int i = 1; i < count; i++) {
+        if (parsed[i].temp_c <= parsed[i - 1].temp_c) {
+            mbp_log(LOG_ERR, "curve points must be sorted by strictly increasing temp_c, keeping previous curve");
+            return;
+        }
+    }
+
+    memcpy(curve, parsed, sizeof(t_curve_point) * count);
+    curve_count = count;
+}
+
 void retrieve_settings(const char *settings_path, t_fans *fans)
 {
     Settings *settings = NULL;
@@ -507,28 +585,45 @@ void retrieve_settings(const char *settings_path, t_fans *fans)
                 free(config_key);
                 fan = fan->next;
             }
-            result = settings_get_int(settings, "general", "low_temp");
-
-            if (result != 0) {
-                low_temp = result;
-            }
-
-            result = settings_get_int(settings, "general", "high_temp");
-
-            if (result != 0) {
-                high_temp = result;
-            }
-
-            result = settings_get_int(settings, "general", "max_temp");
-
-            if (result != 0) {
-                max_temp = result;
-            }
-
             result = settings_get_int(settings, "general", "polling_interval");
 
             if (result != 0) {
                 polling_interval = result;
+            }
+
+            result = settings_get_int(settings, "general", "up_rate");
+
+            if (result != 0) {
+                up_rate = result;
+            }
+
+            result = settings_get_int(settings, "general", "down_rate");
+
+            if (result != 0) {
+                down_rate = result;
+            }
+
+            result = settings_get_int(settings, "general", "temp_alpha_percent");
+
+            if (result != 0) {
+                temp_alpha_percent = result;
+            }
+
+            result = settings_get_int(settings, "general", "hard_max_temp");
+
+            if (result != 0) {
+                hard_max_temp = result;
+            }
+
+            result = settings_get_int(settings, "general", "hard_max_hold");
+
+            if (result != 0) {
+                hard_max_hold = result;
+            }
+
+            char curve_str[512];
+            if (settings_get(settings, "general", "curve", curve_str, sizeof(curve_str))) {
+                parse_curve(curve_str);
             }
 
             /* Destroy the settings object */
@@ -620,9 +715,6 @@ int get_max_mhz(void)
 
 void mbpfan()
 {
-    int old_temp, new_temp, fan_speed, steps;
-    int temp_change;
-
     sensors = retrieve_sensors();
     fans = retrieve_fans();
 
@@ -638,30 +730,13 @@ void mbpfan()
         fan = fan->next;
     }
 
-    if (low_temp > high_temp || high_temp > max_temp) {
-        mbp_log(LOG_ERR, "Invalid temperatures: %d %d %d", low_temp, high_temp, max_temp);
+    if (curve_count < 2) {
+        mbp_log(LOG_ERR, "curve needs at least 2 points");
         exit(EXIT_FAILURE);
     }
 
     set_fans_man(fans);
-
-    new_temp = get_temp(sensors);
     set_fan_minimum_speed(fans);
-
-    fan = fans;
-    while (fan != NULL) {
-
-        fan->step_up = (float)(fan->fan_max_speed - fan->fan_min_speed) / (float)((max_temp - high_temp) * (max_temp - high_temp + 1) / 2.0);
-
-        fan->step_down = (float)(fan->fan_max_speed - fan->fan_min_speed) / (float)((max_temp - low_temp) * (max_temp - low_temp + 1) / 2.0);
-        fan = fan->next;
-    }
-
-recalibrate:
-    if (verbose) {
-        mbp_log(LOG_INFO, "Sleeping for 2 seconds to get first temp delta");
-    }
-    sleep(2);
 
     while (1) {
         if (do_exit) {
@@ -675,39 +750,53 @@ recalibrate:
             do_reload = 0;
         }
 
-        old_temp = new_temp;
-        new_temp = get_temp(sensors);
+        int new_temp = get_temp(sensors);
+
+        if (ema_temp < 0) {
+            ema_temp = new_temp;
+        } else {
+            ema_temp += (temp_alpha_percent / 100.0) * (new_temp - ema_temp);
+        }
+
+        // emergency slam reacts to the raw reading, independent of the
+        // EMA - a real runaway shouldn't wait for the smoothing to catch up
+        if (new_temp >= hard_max_temp) {
+            hard_max_counter++;
+        } else {
+            hard_max_counter = 0;
+        }
+
+        bool emergency = hard_max_counter >= hard_max_hold;
+        int target_percent = emergency ? 100 : curve_interpolate(ema_temp);
+
+        // re-assert manual mode every poll - firmware can silently drop
+        // back to auto mode across suspend/resume
+        set_fans_man(fans);
 
         fan = fans;
-
         while (fan != NULL) {
-            fan_speed = fan->old_speed;
+            int target_rpm = fan->fan_min_speed +
+                              (int) lround(target_percent / 100.0 * (fan->fan_max_speed - fan->fan_min_speed));
+            int current = fan->old_speed > 0 ? fan->old_speed : fan->fan_min_speed;
+            int new_speed;
 
-            if (new_temp >= max_temp && fan->old_speed != fan->fan_max_speed) {
-                fan_speed = fan->fan_max_speed;
-            }
-
-            if (new_temp <= low_temp && fan_speed != fan->fan_min_speed) {
-                fan_speed = fan->fan_min_speed;
-            }
-
-            temp_change = new_temp - old_temp;
-
-            if (temp_change > 0 && new_temp > high_temp && new_temp < max_temp) {
-                steps = (new_temp - high_temp) * (new_temp - high_temp + 1) / 2;
-                fan_speed = max(fan_speed, ceil(fan->fan_min_speed + steps * fan->step_up));
-            }
-
-            if (temp_change < 0 && new_temp > low_temp && new_temp < max_temp) {
-                steps = (max_temp - new_temp) * (max_temp - new_temp + 1) / 2;
-                fan_speed = min(fan_speed, floor(fan->fan_max_speed - steps * fan->step_down));
+            if (emergency) {
+                new_speed = target_rpm; // bypass slew for a real runaway
+            } else if (target_rpm > current) {
+                new_speed = min(target_rpm, current + up_rate * polling_interval);
+            } else if (target_rpm < current) {
+                new_speed = max(target_rpm, current - down_rate * polling_interval);
+            } else {
+                new_speed = current;
             }
 
             if (verbose) {
-                mbp_log(LOG_INFO, "Old Temp: %d New Temp: %d Fan: %s Speed: %d Max MHz: %d", old_temp, new_temp, fan->label, fan_speed, get_max_mhz());
+                mbp_log(LOG_INFO, "New Temp: %d EMA: %.1f Fan: %s Target: %d%% Speed: %d Max MHz: %d%s",
+                        new_temp, ema_temp, fan->label, target_percent, new_speed, get_max_mhz(),
+                        emergency ? " EMERGENCY" : "");
             }
 
-            set_fan_speed(fan, fan_speed);
+            set_fan_speed(fan, new_speed);
             fan = fan->next;
         }
 
@@ -715,20 +804,11 @@ recalibrate:
             mbp_log(LOG_INFO, "Sleeping for %d seconds", polling_interval);
         }
 
-        time_t before_sleep = time(NULL);
-
         // call nanosleep instead of sleep to avoid rt_sigprocmask and
         // rt_sigaction
         struct timespec ts;
         ts.tv_sec = polling_interval;
         ts.tv_nsec = 0;
         nanosleep(&ts, NULL);
-
-        time_t after_sleep = time(NULL);
-        if (after_sleep - before_sleep > 2 * polling_interval) {
-            mbp_log(LOG_INFO, "Clock skew detected - slept for %ld seconds but expected %d", after_sleep - before_sleep, polling_interval);
-            set_fans_man(fans);
-            goto recalibrate;
-        }
     }
 }
