@@ -17,6 +17,7 @@
 #ifndef _MBPFAN_H_
 #define _MBPFAN_H_
 
+#include <limits.h>
 #include <stdbool.h>
 
 #include "global.h"
@@ -70,6 +71,15 @@ extern int hard_max_temp;
 extern int hard_max_hold;
 
 char *smprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/**
+ * Resolve the fan/pwm sysfs attribute path prefixes for the applesmc device
+ * at device_path, accounting for the kernel >= 7.3 hwmon/hwmonN nesting
+ */
+void resolve_applesmc_fan_paths(const char *device_path, char *fan_path_out, char *pwm_path_out);
+
+extern char applesmc_fan_path[PATH_MAX];
+extern char applesmc_pwm_path[PATH_MAX];
 
 /**
  * Return true if the kernel is < 3.15.0

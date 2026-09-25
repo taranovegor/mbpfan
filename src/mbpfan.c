@@ -90,6 +90,7 @@ t_sensors *sensors = NULL;
 t_fans *fans = NULL;
 char applesmc_path[PATH_MAX];
 char applesmc_fan_path[PATH_MAX];
+char applesmc_pwm_path[PATH_MAX];
 
 
 char *smprintf(const char *fmt, ...)
@@ -289,9 +290,12 @@ t_fans *retrieve_fans()
     char *path_fan_min = NULL;
 
     const char *path_begin = (const char *) &applesmc_fan_path;
+    const char *pwm_begin = (const char *) &applesmc_pwm_path;
     const char *path_output_end = "_output";
+    const char *path_target_end = "_target";
     const char *path_label_end = "_label";
     const char *path_man_end = "_manual";
+    const char *path_pwm_enable_end = "_enable";
     const char *path_max_speed = "_max";
     const char *path_min_speed = "_min";
 
@@ -300,18 +304,37 @@ t_fans *retrieve_fans()
 
     for (counter = 0; counter < NUM_FANS; counter++) {
 
-        path_output = smprintf("%s%d%s", path_begin, counter, path_output_end);
+        int fan_manual_off = 0;
+        FILE *file = NULL;
+
+        // kernel >= 7.3 renamed fanX_output/fanX_manual to fanX_target/pwmX_enable;
+        // pwmX_enable takes 1 (manual) or 2 (auto), 0 is rejected
+        path_output = smprintf("%s%d%s", path_begin, counter, path_target_end);
+
+        if (access(path_output, F_OK) == 0) {
+            path_manual = smprintf("%s%d%s", pwm_begin, counter, path_pwm_enable_end);
+            fan_manual_off = 2;
+        } else {
+            free(path_output);
+            path_output = smprintf("%s%d%s", path_begin, counter, path_output_end);
+            path_manual = smprintf("%s%d%s", path_begin, counter, path_man_end);
+        }
+
+        // check first so fopen("w") never creates an attribute the kernel doesn't expose
+        if (access(path_output, F_OK) == 0) {
+            file = fopen(path_output, "w");
+        }
+
         path_label = smprintf("%s%d%s", path_begin, counter, path_label_end);
-        path_manual = smprintf("%s%d%s", path_begin, counter, path_man_end);
         path_fan_min = smprintf("%s%d%s", path_begin, counter, path_min_speed);
         path_fan_max = smprintf("%s%d%s", path_begin, counter, path_max_speed);
-
-        FILE *file = fopen(path_output, "w");
 
         if (file != NULL) {
             fan = (t_fans *)malloc(sizeof(t_fans));
             fan->fan_output_path = strdup(path_output);
             fan->fan_manual_path = strdup(path_manual);
+            fan->fan_manual_on = 1; // same value for fanX_manual and pwmX_enable
+            fan->fan_manual_off = fan_manual_off;
             fan->fan_id = counter;
 
             int fan_speed = read_value(path_fan_min);
@@ -375,7 +398,7 @@ t_fans *retrieve_fans()
     return fans_head;
 }
 
-static void set_fans_mode(t_fans *fans, int mode)
+static void set_fans_mode(t_fans *fans, bool manual)
 {
     t_fans *tmp = fans;
     FILE *file;
@@ -384,7 +407,7 @@ static void set_fans_mode(t_fans *fans, int mode)
         file = fopen(tmp->fan_manual_path, "rw+");
 
         if (file != NULL) {
-            fprintf(file, "%d", mode);
+            fprintf(file, "%d", manual ? tmp->fan_manual_on : tmp->fan_manual_off);
             fclose(file);
         }
 
@@ -395,13 +418,13 @@ static void set_fans_mode(t_fans *fans, int mode)
 void set_fans_man(t_fans *fans)
 {
 
-    set_fans_mode(fans, 1);
+    set_fans_mode(fans, true);
 }
 
 void set_fans_auto(t_fans *fans)
 {
 
-    set_fans_mode(fans, 0);
+    set_fans_mode(fans, false);
 }
 
 t_sensors *refresh_sensors(t_sensors *sensors)
@@ -630,6 +653,40 @@ void retrieve_settings(const char *settings_path, t_fans *fans)
     }
 }
 
+// kernel >= 7.3 nests fan attributes one level deeper, under hwmon/hwmonN;
+// fall back to the legacy flat layout (< 7.3) when that's missing. Older
+// kernels also have hwmon/hwmonN, but it holds no fan attributes, so probe
+// for fan1_min rather than trusting the directory alone
+void resolve_applesmc_fan_paths(const char *device_path, char *fan_path_out, char *pwm_path_out)
+{
+    char *base_path = strdup(device_path);
+    char *hwmon_dir_path = smprintf("%s/hwmon", device_path);
+    DIR *hwmon_dir = opendir(hwmon_dir_path);
+
+    if (hwmon_dir != NULL) {
+        struct dirent *ent;
+        while ((ent = readdir(hwmon_dir)) != NULL) {
+            if (strncmp(ent->d_name, "hwmon", 5) == 0) {
+                char *probe = smprintf("%s/%s/fan1_min", hwmon_dir_path, ent->d_name);
+                bool nested = access(probe, F_OK) == 0;
+                free(probe);
+
+                if (nested) {
+                    free(base_path);
+                    base_path = smprintf("%s/%s", hwmon_dir_path, ent->d_name);
+                }
+                break;
+            }
+        }
+        closedir(hwmon_dir);
+    }
+    free(hwmon_dir_path);
+
+    snprintf(fan_path_out, PATH_MAX, "%s/fan", base_path);
+    snprintf(pwm_path_out, PATH_MAX, "%s/pwm", base_path);
+    free(base_path);
+}
+
 void check_requirements(const char *program_path)
 {
 
@@ -657,6 +714,7 @@ void check_requirements(const char *program_path)
     closedir(dir);
     memset(&applesmc_path, 0, PATH_MAX);
     memset(&applesmc_fan_path, 0, PATH_MAX);
+    memset(&applesmc_pwm_path, 0, PATH_MAX);
 
     dir = opendir(APPLESMC_PATH);
 
@@ -681,9 +739,11 @@ void check_requirements(const char *program_path)
     }
 
     if (strlen(applesmc_path) != 0) {
-        strncpy((char *) &applesmc_fan_path, (char *) &applesmc_path, PATH_MAX);
-        strcat((char *) &applesmc_fan_path, "/fan");
         if (verbose) mbp_log(LOG_INFO, "applesmc device path: %s", (char *) &applesmc_path);
+
+        resolve_applesmc_fan_paths(applesmc_path, applesmc_fan_path, applesmc_pwm_path);
+
+        if (verbose) mbp_log(LOG_INFO, "applesmc fan attribute path: %s", (char *) &applesmc_fan_path);
 
     } else {
         mbp_log(LOG_ERR, "%s needs applesmc support. Please either load it or build it into the kernel. Exiting.", program_path);

@@ -6,7 +6,10 @@
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <ftw.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
+#include <unistd.h>
 #include "../src/global.h"
 #include "../src/mbpfan.h"
 #include "../src/settings.h"
@@ -18,6 +21,9 @@ static void free_fans(t_fans* fans)
 {
     while (fans != NULL) {
         t_fans* tmp = fans->next;
+        if (fans->file != NULL) {
+            fclose(fans->file);
+        }
         free(fans->fan_manual_path);
         free(fans->fan_output_path);
         free(fans->label);
@@ -75,6 +81,197 @@ static const char *test_fan_paths()
     mu_assert("No fans found", found_fan_path != 0);
     free_fans(fans);
     return 0;
+}
+
+static void write_file(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "w");
+    if (f != NULL) {
+        fputs(content, f);
+        fclose(f);
+    }
+}
+
+static int read_int(const char *path)
+{
+    int value = -1;
+    FILE *f = fopen(path, "r");
+    if (f != NULL) {
+        if (fscanf(f, "%d", &value) != 1) {
+            value = -1;
+        }
+        fclose(f);
+    }
+    return value;
+}
+
+static int remove_entry(const char *path, const struct stat *sb, int flag, struct FTW *ftwbuf)
+{
+    return remove(path);
+}
+
+static const char *check_resolve_applesmc_fan_paths(const char *base)
+{
+    char fan_path[PATH_MAX];
+    char pwm_path[PATH_MAX];
+    char expected[PATH_MAX + 32];
+
+    // legacy layout (< 7.3): attributes sit directly under the device path
+    resolve_applesmc_fan_paths(base, fan_path, pwm_path);
+    snprintf(expected, sizeof(expected), "%s/fan", base);
+    mu_assert("Legacy fan path mismatch", strcmp(fan_path, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s/pwm", base);
+    mu_assert("Legacy pwm path mismatch", strcmp(pwm_path, expected) == 0);
+
+    // legacy kernels still register hwmon/hwmonN, just without fan attributes
+    char hwmon_dir[PATH_MAX];
+    char hwmon_dev[PATH_MAX + 16];
+    char fan_min[PATH_MAX + 32];
+    snprintf(hwmon_dir, sizeof(hwmon_dir), "%s/hwmon", base);
+    snprintf(hwmon_dev, sizeof(hwmon_dev), "%s/hwmon3", hwmon_dir);
+    snprintf(fan_min, sizeof(fan_min), "%s/fan1_min", hwmon_dev);
+    mu_assert("Could not create hwmon dir", mkdir(hwmon_dir, 0755) == 0);
+    mu_assert("Could not create hwmon3 dir", mkdir(hwmon_dev, 0755) == 0);
+
+    resolve_applesmc_fan_paths(base, fan_path, pwm_path);
+    snprintf(expected, sizeof(expected), "%s/fan", base);
+    mu_assert("Legacy fan path with empty hwmonN mismatch", strcmp(fan_path, expected) == 0);
+
+    // modern layout (>= 7.3): attributes nested under hwmon/hwmonN
+    write_file(fan_min, "1000");
+
+    resolve_applesmc_fan_paths(base, fan_path, pwm_path);
+    snprintf(expected, sizeof(expected), "%s/fan", hwmon_dev);
+    mu_assert("Modern fan path mismatch", strcmp(fan_path, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s/pwm", hwmon_dev);
+    mu_assert("Modern pwm path mismatch", strcmp(pwm_path, expected) == 0);
+
+    return 0;
+}
+
+static const char *test_resolve_applesmc_fan_paths()
+{
+    char base[] = "/tmp/mbpfan_test_paths_XXXXXX";
+    mu_assert("Could not create temp dir", mkdtemp(base) != NULL);
+
+    const char *message = check_resolve_applesmc_fan_paths(base);
+
+    nftw(base, remove_entry, 8, FTW_DEPTH | FTW_PHYS);
+    return message;
+}
+
+// Builds a fake applesmc device with a single fan1 under base. Kernels >= 7.3
+// put the fan attributes into hwmon/hwmon1 and rename output/manual to
+// target/pwm_enable; older ones keep them on the device itself and leave
+// hwmon/hwmon1 without any fan attributes
+static void make_fake_applesmc(const char *base, bool modern)
+{
+    char dir[PATH_MAX];
+    char path[PATH_MAX + 32];
+
+    snprintf(dir, sizeof(dir), "%s/hwmon", base);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/hwmon/hwmon1", base);
+    mkdir(dir, 0755);
+
+    if (modern) {
+        snprintf(path, sizeof(path), "%s/fan1_target", dir); write_file(path, "0");
+        snprintf(path, sizeof(path), "%s/pwm1_enable", dir); write_file(path, "2");
+    } else {
+        snprintf(dir, sizeof(dir), "%s", base);
+        snprintf(path, sizeof(path), "%s/fan1_output", dir); write_file(path, "0");
+        snprintf(path, sizeof(path), "%s/fan1_manual", dir); write_file(path, "0");
+    }
+
+    snprintf(path, sizeof(path), "%s/fan1_min", dir); write_file(path, "1000");
+    snprintf(path, sizeof(path), "%s/fan1_max", dir); write_file(path, "6000");
+    snprintf(path, sizeof(path), "%s/fan1_label", dir); write_file(path, "Left side\n");
+}
+
+// Runs discovery and fan control against the fake device the same way
+// mbpfan() does, and checks what actually lands in the attribute files
+static const char *check_fake_applesmc(const char *base, bool modern, t_fans **fans_out)
+{
+    char dir[PATH_MAX];
+    char expected[PATH_MAX + 32];
+
+    if (modern) {
+        snprintf(dir, sizeof(dir), "%s/hwmon/hwmon1", base);
+    } else {
+        snprintf(dir, sizeof(dir), "%s", base);
+    }
+
+    resolve_applesmc_fan_paths(base, applesmc_fan_path, applesmc_pwm_path);
+    snprintf(expected, sizeof(expected), "%s/fan", dir);
+    mu_assert("Fan attributes resolved to the wrong directory", strcmp(applesmc_fan_path, expected) == 0);
+
+    t_fans *fans = retrieve_fans();
+    *fans_out = fans;
+
+    mu_assert("Expected exactly fan1 to be found", fans != NULL && fans->fan_id == 1 && fans->next == NULL);
+
+    snprintf(expected, sizeof(expected), "%s/%s", dir, modern ? "fan1_target" : "fan1_output");
+    mu_assert("Fan uses the wrong speed attribute", strcmp(fans->fan_output_path, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s/%s", dir, modern ? "pwm1_enable" : "fan1_manual");
+    mu_assert("Fan uses the wrong mode attribute", strcmp(fans->fan_manual_path, expected) == 0);
+
+    mu_assert("fan1_min was not read", fans->fan_min_speed == 1000);
+    mu_assert("fan1_max was not read", fans->fan_max_speed == 6000);
+    mu_assert("fan1_label was not read", strcmp(fans->label, "Left side") == 0);
+
+    // discovery must not create attributes of the other kernel layout
+    snprintf(expected, sizeof(expected), "%s/%s", dir, modern ? "fan1_output" : "fan1_target");
+    mu_assert("Discovery created an attribute of the other layout", access(expected, F_OK) != 0);
+    snprintf(expected, sizeof(expected), "%s/%s", dir, modern ? "fan0_target" : "fan0_output");
+    mu_assert("Discovery created an attribute for a missing fan", access(expected, F_OK) != 0);
+
+    set_fans_man(fans);
+    mu_assert("Manual mode should write 1", read_int(fans->fan_manual_path) == 1);
+
+    set_fan_speed(fans, 2500);
+    mu_assert("Fan speed was not written", read_int(fans->fan_output_path) == 2500);
+
+    set_fans_auto(fans);
+    if (modern) {
+        mu_assert("Auto mode should write 2 to pwmX_enable (0 is rejected)", read_int(fans->fan_manual_path) == 2);
+    } else {
+        mu_assert("Auto mode should write 0 to fanX_manual", read_int(fans->fan_manual_path) == 0);
+    }
+
+    return 0;
+}
+
+static const char *run_fake_applesmc(bool modern)
+{
+    char base[] = "/tmp/mbpfan_test_applesmc_XXXXXX";
+    mu_assert("Could not create temp dir", mkdtemp(base) != NULL);
+
+    make_fake_applesmc(base, modern);
+
+    char saved_fan_path[PATH_MAX];
+    char saved_pwm_path[PATH_MAX];
+    memcpy(saved_fan_path, applesmc_fan_path, PATH_MAX);
+    memcpy(saved_pwm_path, applesmc_pwm_path, PATH_MAX);
+
+    t_fans *fans = NULL;
+    const char *message = check_fake_applesmc(base, modern, &fans);
+
+    memcpy(applesmc_fan_path, saved_fan_path, PATH_MAX);
+    memcpy(applesmc_pwm_path, saved_pwm_path, PATH_MAX);
+    free_fans(fans);
+    nftw(base, remove_entry, 8, FTW_DEPTH | FTW_PHYS);
+
+    return message;
+}
+
+static const char *test_fake_applesmc_legacy()
+{
+    return run_fake_applesmc(false);
+}
+
+static const char *test_fake_applesmc_modern()
+{
+    return run_fake_applesmc(true);
 }
 
 unsigned time_seed()
@@ -239,6 +436,7 @@ static const char *test_settings_reload()
     fan->fan_manual_path = NULL;
     fan->fan_output_path = NULL;
     fan->label = NULL;
+    fan->file = NULL;
     fan->next = NULL;
 
     signal(SIGHUP, handler);
@@ -308,6 +506,9 @@ static const char *all_tests()
 {
     mu_run_test(test_sensor_paths);
     mu_run_test(test_fan_paths);
+    mu_run_test(test_resolve_applesmc_fan_paths);
+    mu_run_test(test_fake_applesmc_legacy);
+    mu_run_test(test_fake_applesmc_modern);
     mu_run_test(test_get_temp);
     mu_run_test(test_config_file);
     mu_run_test(test_settings);

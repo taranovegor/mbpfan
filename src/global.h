@@ -23,6 +23,8 @@ struct s_fans {
     char *label;
     char *fan_output_path;
     char *fan_manual_path;
+    int fan_manual_on;
+    int fan_manual_off;
     int fan_id;
     int old_speed;
     int fan_max_speed;
