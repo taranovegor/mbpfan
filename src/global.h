@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #define PROGRAM_NAME "mbpfan"
-#define PROGRAM_VERSION "1.0.0"
+#define PROGRAM_VERSION "1.0.1"
 #define PROGRAM_PID "/run/mbpfan.pid"
 
 extern int daemonize;
