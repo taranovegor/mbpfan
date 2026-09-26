@@ -448,7 +448,7 @@ t_sensors *refresh_sensors(t_sensors *sensors)
 /* Controls the speed of a fan */
 void set_fan_speed(t_fans *fan, int speed)
 {
-    if (fan != NULL && fan->file != NULL && fan->old_speed != speed) {
+    if (fan != NULL && fan->file != NULL) {
         char buf[16];
         int len = snprintf(buf, sizeof(buf), "%d", speed);
         int res = pwrite(fileno(fan->file), buf, len, /*offset=*/0);

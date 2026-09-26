@@ -231,6 +231,16 @@ static const char *check_fake_applesmc(const char *base, bool modern, t_fans **f
     set_fan_speed(fans, 2500);
     mu_assert("Fan speed was not written", read_int(fans->fan_output_path) == 2500);
 
+    // firmware drops back to auto with a zero target across suspend/resume;
+    // the next poll must restore both, even though the speed is unchanged,
+    // so set_fan_speed() must not skip writing a speed it already set
+    write_file(fans->fan_manual_path, modern ? "2" : "0");
+    write_file(fans->fan_output_path, "0");
+    set_fans_man(fans);
+    set_fan_speed(fans, 2500);
+    mu_assert("Manual mode was not restored after resume", read_int(fans->fan_manual_path) == 1);
+    mu_assert("Unchanged fan speed was not restored after resume", read_int(fans->fan_output_path) == 2500);
+
     set_fans_auto(fans);
     if (modern) {
         mu_assert("Auto mode should write 2 to pwmX_enable (0 is rejected)", read_int(fans->fan_manual_path) == 2);
