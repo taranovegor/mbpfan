@@ -1,0 +1,96 @@
+name: tec-mbpfan
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: semver
+release: 1
+section: utils
+priority: optional
+maintainer: Egor Taranov <dev@taranovegor.com>
+description: |
+  Fan control daemon for Apple MacBook / MacBook Pro.
+  Reads coretemp temperatures and drives the fans through applesmc
+  along an EMA-smoothed multi-point curve.
+  This is the taranovegor/mbpfan fork; it replaces the distribution's
+  mbpfan package and uses a different /etc/mbpfan.conf format.
+homepage: https://github.com/taranovegor/mbpfan
+license: GPL-3.0-or-later
+
+# The distro's mbpfan has a higher version; replace it instead.
+provides:
+  - mbpfan
+conflicts:
+  - mbpfan
+replaces:
+  - mbpfan
+
+overrides:
+  deb:
+    depends:
+      - libc6
+  rpm:
+    depends:
+      - glibc
+  archlinux:
+    depends:
+      - glibc
+    scripts:
+      postinstall: packaging/scripts/postinstall-archlinux.sh
+      preremove: packaging/scripts/preremove-archlinux.sh
+
+rpm:
+  scripts:
+    posttrans: packaging/scripts/posttrans-rpm.sh
+
+archlinux:
+  packager: Egor Taranov <dev@taranovegor.com>
+  scripts:
+    postupgrade: packaging/scripts/postinstall.sh
+
+contents:
+  - src: bin/mbpfan
+    dst: /usr/sbin/mbpfan
+    packager: deb
+    file_info:
+      mode: 0755
+  - src: bin/mbpfan
+    dst: /usr/sbin/mbpfan
+    packager: rpm
+    file_info:
+      mode: 0755
+  # Arch's /usr/sbin is a symlink to bin.
+  - src: bin/mbpfan
+    dst: /usr/bin/mbpfan
+    packager: archlinux
+    file_info:
+      mode: 0755
+  - src: mbpfan.conf
+    dst: /etc/mbpfan.conf
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: mbpfan.service
+    dst: /usr/lib/systemd/system/mbpfan.service
+    file_info:
+      mode: 0644
+  - src: mbpfan.depend.conf
+    dst: /usr/lib/modules-load.d/mbpfan.depend.conf
+    file_info:
+      mode: 0644
+  - src: mbpfan.8.gz
+    dst: /usr/share/man/man8/mbpfan.8.gz
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/tec-mbpfan/README.md
+    file_info:
+      mode: 0644
+  - src: AUTHORS
+    dst: /usr/share/doc/tec-mbpfan/AUTHORS
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh

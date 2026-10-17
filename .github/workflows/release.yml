@@ -16,8 +16,20 @@ jobs:
       - run: |
           cp bin/mbpfan mbpfan-linux-amd64
           sha256sum mbpfan-linux-amd64 > mbpfan-linux-amd64.sha256
+      - uses: secondlife/setup-nfpm@v5
+        with:
+          version: 2.47.0
+      - name: Build packages
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for packager in deb rpm archlinux; do
+            nfpm package -f packaging/nfpm.yaml -p "$packager" -t dist/
+          done
+          (cd dist && sha256sum mbpfan* > SHA256SUMS)
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             mbpfan-linux-amd64
             mbpfan-linux-amd64.sha256
+            dist/*
