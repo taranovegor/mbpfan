@@ -18,4 +18,5 @@ void mbp_log(int level, const char *fmt, ...)
     vprintf(fmt, args);
     puts(""); // trailing newline
     va_end(args);
+    fflush(stdout); // under systemd stdout is a pipe, fully buffered until exit
 }
