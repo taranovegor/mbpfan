@@ -61,9 +61,9 @@
 
 // default temp_c -> percent curve, linearly interpolated and clamped at the ends
 t_curve_point curve[MAX_CURVE_POINTS] = {
-    {55, 23}, {72, 24}, {80, 31}, {85, 51}, {90, 65}, {95, 83}, {100, 100},
+    {65, 0}, {75, 15}, {82, 35}, {88, 65}, {95, 100},
 };
-int curve_count = 7;
+int curve_count = 5;
 
 int up_rate = 350;   // rpm/s ramping up
 int down_rate = 600; // rpm/s ramping down
