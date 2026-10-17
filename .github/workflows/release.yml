@@ -26,7 +26,7 @@ jobs:
           for packager in deb rpm archlinux; do
             nfpm package -f packaging/nfpm.yaml -p "$packager" -t dist/
           done
-          (cd dist && sha256sum mbpfan* > SHA256SUMS)
+          (cd dist && sha256sum tec-mbpfan* > SHA256SUMS)
       - uses: softprops/action-gh-release@v2
         with:
           files: |
