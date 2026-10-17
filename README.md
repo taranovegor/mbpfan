@@ -21,13 +21,9 @@ This enhanced version assumes any number of processors and fans (max. 10).
 - [Tested Mac Models](#tested-mac-models)
 - [Requirements](#requirements)
 - [Installation](#installation)
-	- [Arch Linux](#arch-linux)
-	- [CRUX Linux](#crux-linux)
-	- [Debian](#debian)
-	- [Fedora](#fedora)
+	- [Debian, Ubuntu, Fedora, Arch Linux](#debian-ubuntu-fedora-arch-linux)
 	- [Gentoo](#gentoo)
 	- [Solus](#solus)
-	- [Ubuntu](#ubuntu)
 	- [Generic Install Instructions (All Other Operating Systems)](#generic-install-instructions-all-other-operating-systems)
 - [Run Instructions](#run-instructions)
 - [Starting at boot](#starting-at-boot)
@@ -99,30 +95,35 @@ Please check the relevant documentation of your GNU/Linux distribution.
 
 ## Installation
 
-### Arch Linux
+### Debian, Ubuntu, Fedora, Arch Linux
 
-See [mbpfan-git at AUR](https://aur.archlinux.org/packages/mbpfan-git/).
-Otherwise, please refer to the Generic Instructions.
-
-### CRUX Linux
-
-Follow the instructions on [jolupalabs REPO](https://github.com/jolupa/jolupalabs) for installation.
-
-### Debian
-
-On Debian 10 or later install via:
+Download the package for your system from the
+[latest release](https://github.com/taranovegor/mbpfan/releases/latest) and install it:
 
 ```
-sudo apt-get install mbpfan
+# Debian, Ubuntu
+sudo apt install ./tec-mbpfan_*_amd64.deb
+
+# Fedora
+sudo dnf install ./tec-mbpfan-*.x86_64.rpm
+
+# Arch Linux
+sudo pacman -U tec-mbpfan-*-x86_64.pkg.tar.zst
 ```
 
-### Fedora
+The package enables and starts the mbpfan service on first install.
+If you turn the service off later, upgrades will not turn it back on.
 
-On Fedora 30 or later:
+The package is called `tec-mbpfan`. It replaces the `mbpfan` package from your
+distribution, so a system update will not bring the upstream version back.
+The program, the service and the config file are still called `mbpfan`.
 
-```
-sudo dnf install mbpfan
-```
+If you had upstream mbpfan before and changed `/etc/mbpfan.conf`, your old file
+stays in place. This fork uses a different config format, so check the file
+against [mbpfan.conf](mbpfan.conf).
+
+The packages need glibc 2.34 or newer (Debian 12, Ubuntu 22.04, Fedora 35 or newer).
+On older systems, use the Generic Install Instructions below.
 
 ### Gentoo
 
@@ -139,14 +140,6 @@ sudo eopkg install mbpfan
 ```
 then enable the service.
 
-
-### Ubuntu
-
-On Ubuntu 18.04 or later install via:
-
-```
-sudo apt-get install mbpfan
-```
 
 ### Generic Install Instructions (All Other Operating Systems)
 
@@ -228,13 +221,11 @@ To automatically run mbpfan at boot, run as root:
 
 
 **systemd**
-As a special bonus, a service file for systemd is also included. To use it,
-execute the following (as root):
+The packages enable and start the service on first install.
+After `make install`, run this to start mbpfan now and at every boot:
 
-    sudo cp mbpfan.service /etc/systemd/system/
-    sudo systemctl enable mbpfan.service
     sudo systemctl daemon-reload
-    sudo systemctl start mbpfan.service
+    sudo systemctl enable --now mbpfan.service
 
 **dinit**
 A [dinit](https://github.com/davmac314/dinit) service definition is also included. To use it, execute the following:
