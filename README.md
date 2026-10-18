@@ -2,263 +2,344 @@
 
 [![Build](https://github.com/taranovegor/mbpfan/actions/workflows/build.yml/badge.svg)](https://github.com/taranovegor/mbpfan/actions/workflows/build.yml)
 
-This is an enhanced version of [Allan McRae mbpfan](http://allanmcrae.com/2010/05/simple-macbook-pro-fan-daemon/)
+A fan control daemon for MacBooks running Linux. It reads CPU temperatures
+from the `coretemp` driver and sets fan speeds through the `applesmc` driver.
 
-mbpfan is a daemon that uses input from coretemp module and sets the fan speed using the applesmc module.
-This enhanced version assumes any number of processors and fans (max. 10).
+This is a fork of [mbpfan](https://github.com/linux-on-mac/mbpfan). The goal
+is a fan that stays quiet and changes speed slowly, instead of sitting silent
+until the laptop gets hot and then running at full speed for a long time.
+The fork has its own releases and packages, and its config format is not
+compatible with upstream.
 
-* It only uses the temperatures from the processors as input.
-* It requires coretemp and applesmc kernel modules to be loaded.
-* It requires root use
-* It daemonizes or stays in foreground
-* Verbose mode for both syslog and stdout
-* Users can configure it using the file /etc/mbpfan.conf
-
-**Table Of Contents**
-
-- [Fork Differences from Upstream](#fork-differences-from-upstream)
-- [Supported GNU/Linux Distributions](#supported-gnulinux-distributions)
-- [Tested Mac Models](#tested-mac-models)
+- [How it differs from upstream](#how-it-differs-from-upstream)
 - [Requirements](#requirements)
 - [Installation](#installation)
-	- [Debian, Ubuntu, Fedora, Arch Linux](#debian-ubuntu-fedora-arch-linux)
-	- [Gentoo](#gentoo)
-	- [Solus](#solus)
-	- [Generic Install Instructions (All Other Operating Systems)](#generic-install-instructions-all-other-operating-systems)
-- [Run Instructions](#run-instructions)
-- [Starting at boot](#starting-at-boot)
-- [Usage](#usage)
-- [References](#references)
+- [Check that it works](#check-that-it-works)
+- [Configuration](#configuration)
+- [Tuning the curve](#tuning-the-curve)
+- [Command line](#command-line)
+- [Building from source](#building-from-source)
 - [License](#license)
 - [Credits](#credits)
 
-## Fork Differences from Upstream
+## How it differs from upstream
 
-This fork replaces the `low_temp`/`high_temp`/`max_temp` linear ramp with a different control algorithm:
+**Smoothed temperature.** Each new reading is blended into a smoothed
+average (an exponential moving average). With the default settings the
+average lags the real temperature by about ten readings, which is ten
+seconds at one reading per second. Short load spikes, like opening a
+browser tab, barely move the fan.
 
-* EMA-smoothed temperature reading (avoids fan hunting on short load bursts)
-* multi-point `curve` config option (`temp_c:percent` pairs, linearly interpolated) instead of three fixed thresholds
-* asymmetric slew rate limiting (`up_rate`/`down_rate`) so the fan ramps toward the target instead of snapping to it
-* emergency slam to 100% if the raw (unsmoothed) temperature stays at or above `hard_max_temp` for `hard_max_hold` consecutive polls
-* re-asserts manual fan control every poll (survives suspend/resume dropping it back to auto)
+**A fan curve instead of three thresholds.** Upstream maps temperature to
+speed with a straight line between `low_temp` and `high_temp`. Here you set
+a list of `temperature:percent` points, and speeds between them are
+interpolated. You decide how flat or steep each part of the curve is.
 
-New `/etc/mbpfan.conf` keys: `up_rate`, `down_rate`, `temp_alpha_percent`, `hard_max_temp`, `hard_max_hold`, `curve`. The `low_temp`/`high_temp`/`max_temp` keys are gone - see [mbpfan.conf](mbpfan.conf) for a documented example.
+**Gradual speed changes.** The fan moves toward its target speed at a set
+number of RPM per second. The rates for speeding up and slowing down are
+separate (`up_rate`, `down_rate`), so by default it spins up slowly and
+calms down faster.
 
-## Supported GNU/Linux Distributions
+**Emergency limit.** If the raw temperature (not the smoothed one) stays at
+or above `hard_max_temp` for `hard_max_hold` readings in a row, the fan goes
+straight to maximum speed. Smoothing never delays a real overheat.
 
-We provide scripts to to load mbpfan daemon at system boot for many distros.
-Please note that the support is provided by volunteers. mbpfan needs tests and bug reports.
+**Survives suspend.** After resume, the firmware can quietly take fan
+control back. mbpfan sets manual mode and the current speed again on every
+reading, so it takes over again right away.
 
-Supported distributions:
-
-- Ubuntu
-- Debian
-- Archlinux
-- Fedora
-- RedHat
-- CentOS
-- Gentoo
-- Alpine
-- Trisquel
-- Solus
-
-## Tested Mac Models
-
-See https://github.com/linux-on-mac/mbpfan/wiki/Tested-Mac-Models .
+**Kernel 7.3 support.** Linux 7.3 moved the applesmc fan files under
+`hwmon` and renamed them (`fanN_target` and `pwmN_enable` instead of
+`fanN_output` and `fanN_manual`). mbpfan detects which layout the running
+kernel uses and works with both, from older kernels up to 7.3.
 
 ## Requirements
 
-Be sure to load the kernel modules **applesmc** and **coretemp**.
+- A MacBook or MacBook Pro with an Intel CPU.
+- The `coretemp` and `applesmc` kernel modules.
+- 64-bit Linux (x86_64, which the release files call `amd64`) with glibc
+  2.34 or newer. That is Debian 12, Ubuntu 22.04, Fedora 35 or any later
+  release, and any Arch Linux updated since 2021. To check another system,
+  run `ldd --version`.
+- systemd, if you want the service to start at boot.
 
-These modules are often automatically loaded when booting up GNU/Linux on a MacBook. If that is not the case, you should make sure to load them at system startup.
+Most distributions load both modules automatically on a Mac. To check:
 
-**How do I know if applesmc and coretemp are loaded?**
-
-In most distributions, you can run the following command:
-
-```bash
+```
 lsmod | grep -e applesmc -e coretemp
 ```
 
-If you see `coretemp` and `applesmc` listed, you are all set.
+If one is missing, load both now:
 
-**If you do not see `coretemp` and `applesmc` listed, you must load them.**
+```
+sudo modprobe -a coretemp applesmc
+```
 
-This is _usually_ achieved by inserting the following two lines in the file `/etc/modules`
+To load them at every boot, create `/etc/modules-load.d/mbpfan.conf` with
+one module name per line:
 
 ```
 coretemp
 applesmc
 ```
 
-Please check the relevant documentation of your GNU/Linux distribution.
+The packages install `/usr/lib/modules-load.d/mbpfan.depend.conf`, which
+loads `coretemp` only. `applesmc` is usually loaded by the system on its
+own.
+
+People have reported which Mac models work in the
+[upstream wiki](https://github.com/linux-on-mac/mbpfan/wiki/Tested-Mac-Models).
+The hardware side has not changed in this fork, so that list still applies.
 
 ## Installation
 
-### Debian, Ubuntu, Fedora, Arch Linux
+Download the file for your system from the
+[releases page](https://github.com/taranovegor/mbpfan/releases/latest), then
+run the commands below from the folder where you saved it. Each release has
+packages for Debian/Ubuntu, Fedora and Arch Linux, plus a plain binary for
+other systems.
 
-Download the package for your system from the
-[latest release](https://github.com/taranovegor/mbpfan/releases/latest) and install it:
+To check a package download, also save `SHA256SUMS` and run:
 
 ```
-# Debian, Ubuntu
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+### Debian, Ubuntu
+
+```
 sudo apt install ./tec-mbpfan_*_amd64.deb
+```
 
-# Fedora
+### Fedora
+
+```
 sudo dnf install ./tec-mbpfan-*.x86_64.rpm
+```
 
-# Arch Linux
+### Arch Linux
+
+```
 sudo pacman -U tec-mbpfan-*-x86_64.pkg.tar.zst
 ```
 
-The package enables and starts the mbpfan service on first install.
-If you turn the service off later, upgrades will not turn it back on.
+### About the packages
 
-The package is called `tec-mbpfan`. It replaces the `mbpfan` package from your
-distribution, so a system update will not bring the upstream version back.
-The program, the service and the config file are still called `mbpfan`.
+The package is called `tec-mbpfan`, but the program, the service and the
+config file are still called `mbpfan`.
 
-If you had upstream mbpfan before and changed `/etc/mbpfan.conf`, your old file
-stays in place. This fork uses a different config format, so check the file
-against [mbpfan.conf](mbpfan.conf).
+If upstream mbpfan is installed, you don't need to remove it first. The
+package replaces it, and a system update will not bring it back.
 
-The packages need glibc 2.34 or newer (Debian 12, Ubuntu 22.04, Fedora 35 or newer).
-On older systems, use the Generic Install Instructions below.
+On first install the package enables and starts `mbpfan.service`. If you
+disable the service later, upgrades leave it disabled.
 
-### Gentoo
+`/etc/mbpfan.conf` is kept when you install or upgrade. If you edited it
+for upstream mbpfan, it stays as it was. Its `low_temp`, `high_temp` and
+`max_temp` lines are ignored and the default curve is used, so the fans
+still work. `min_fanN_speed` and `max_fanN_speed` lines are still read. To
+use the new settings, compare the file with [mbpfan.conf](mbpfan.conf).
 
-Install the ```mbpfan``` package with:
+To remove the package, use `apt remove tec-mbpfan`, `dnf remove tec-mbpfan`
+or `pacman -R tec-mbpfan`. When the service stops normally, it hands the
+fans back to automatic control. If mbpfan is killed or crashes, the fans
+stay at their last speed until it starts again.
 
-    sudo emerge -av app-laptop/mbpfan
+### Plain binary
 
+`mbpfan-linux-amd64` is the same program without a package. Download it
+together with `mbpfan-linux-amd64.sha256`, then:
 
-### Solus
-
-On Solus, install the package with:
 ```
-sudo eopkg install mbpfan
+sha256sum -c mbpfan-linux-amd64.sha256
+sudo install -m 0755 mbpfan-linux-amd64 /usr/sbin/mbpfan
 ```
-then enable the service.
 
+The binary runs without a config file and uses the built-in defaults. To
+change them, save [mbpfan.conf](mbpfan.conf) as `/etc/mbpfan.conf`. To run
+it at boot with systemd, save [mbpfan.service](mbpfan.service) to
+`/etc/systemd/system/` and run:
 
-### Generic Install Instructions (All Other Operating Systems)
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now mbpfan.service
+```
 
-Compile with
+On a system without systemd, have your init system run `/usr/sbin/mbpfan`
+as root. Without `-f` it forks into the background. With `-f` it stays in
+the foreground, which suits supervisors such as runit or s6. Either way it
+writes its PID to `/run/mbpfan.pid`.
 
-    make
+To remove the binary:
 
-Install with
+```
+sudo systemctl disable --now mbpfan.service
+sudo rm /usr/sbin/mbpfan /etc/systemd/system/mbpfan.service /etc/mbpfan.conf
+sudo systemctl daemon-reload
+```
 
-    sudo make install
+### From source
 
-It copies mbpfan to /usr/sbin, mbpfan.conf to /etc (and overwrites existing files),
-README.md to /usr/share/doc/mbpfan, and mbpfan.8.gz to /usr/share/man/man8
+You need a C compiler and `make`. Build from the `master` branch:
 
-If you would like to compile with Clang instead of GCC, simply set your system's
-default compiler to be Clang. Tested with Clang 3.8 and 3.9. Tested with Clang
-4.0 along with llvm-lld (The LLVM Linker).
+```
+git clone -b master https://github.com/taranovegor/mbpfan.git
+cd mbpfan
+make
+sudo make install
+sudo systemctl daemon-reload
+sudo systemctl enable --now mbpfan.service
+```
 
+Run `make` as your own user first, so `sudo make install` only copies
+files. It installs the program to `/usr/sbin`, the service to
+`/lib/systemd/system`, the config to `/etc` and the man page.
 
-Run The Tests (Optional)
-------------------------
-Users may run the tests after building the program.  Please run the following command _from within the source directory_.
+`make install` overwrites `/etc/mbpfan.conf`, so back it up before you
+reinstall or upgrade this way. `sudo make uninstall` removes everything it
+installed, the config file included. Stop the service before that with
+`sudo systemctl disable --now mbpfan.service`.
 
-    sudo make tests
+## Check that it works
 
-Note that this only works on MacBook and not desktop computers due to different environment expectations.
+```
+systemctl status mbpfan
+journalctl -u mbpfan -f
+```
 
+The service should be `active (running)`. To watch the real fan speed in
+RPM, read `fan1_input`. Its location depends on the kernel:
 
-## Run Instructions
+```
+# kernel older than 7.3
+cat /sys/devices/platform/applesmc.768/fan1_input
+# kernel 7.3 and newer
+cat /sys/devices/platform/applesmc.768/hwmon/hwmon*/fan1_input
+```
 
-If not installed, run with
+## Configuration
 
-    sudo bin/mbpfan
+The config file is `/etc/mbpfan.conf`. The copy in this repository,
+[mbpfan.conf](mbpfan.conf), has a comment for every setting. The main ones:
 
-If installed, manually run with
+| Key | Default | Meaning |
+|---|---|---|
+| `curve` | `65:0,75:15,82:35,88:65,95:100` | `temperature:percent` points, sorted by temperature, 2 to 16 points |
+| `temp_alpha_percent` | `10` | Weight of a new reading in the average, 1 to 100. Lower is smoother and slower. |
+| `up_rate` | `350` | Max RPM increase per second |
+| `down_rate` | `600` | Max RPM decrease per second |
+| `hard_max_temp` | `103` | Raw temperature (°C) that counts toward the emergency limit |
+| `hard_max_hold` | `3` | Readings in a row at that temperature before full speed |
+| `polling_interval` | `1` | Seconds between readings |
+| `min_fanN_speed`, `max_fanN_speed` | from applesmc | Override the speed range of fan N (numbered from 1, as in `fanN_min`) |
 
-    sudo mbpfan
+Percent in `curve` is a share of the fan's own range: 0% is its hardware
+minimum (`fanN_min`), not a stopped fan, and 100% is its maximum. Below the
+first point the fan stays at that point's speed, and above the last point
+it stays at the last one.
 
-If installed and using the init file, run with (Ubuntu example)
+The values are not range-checked, so keep percentages between 0 and 100.
+A setting of `0` is ignored and the previous value stays. If `curve` has a
+mistake in it (a bad point, fewer than two points, or temperatures out of
+order), mbpfan logs an error and keeps the curve it had.
 
-    sudo service mbpfan start
+After editing the file, apply it without a restart:
 
+```
+sudo systemctl reload mbpfan
+```
 
-## Starting at boot
+A reload reads every key again. If you delete a line, the old value stays
+until the next restart. New fans and sensors are only found on restart.
 
-**Ubuntu**
+## Tuning the curve
 
-For systemd based init systems (Ubuntu 16.04+), see the systemd section below.
+For a quiet idle, find the highest fan speed you can't hear, or can only
+just hear, and make it the first point of the curve. A slightly faster fan
+at idle keeps the Mac cooler, so short loads don't push the speed up.
 
-For upstart based init systems (Ubuntu before 16.04), an example upstart job has been provided.
-For using it, execute:
+The curve works in percent, so first find the range of your fan:
 
-    sudo cp mbpfan.upstart /etc/init/mbpfan.conf
-    sudo start mbpfan
+```
+# kernel older than 7.3
+cat /sys/devices/platform/applesmc.768/fan1_{min,max}
+# kernel 7.3 and newer
+cat /sys/devices/platform/applesmc.768/hwmon/hwmon*/fan1_{min,max}
+```
 
-**Debian**
-An init file suitable for /lib/lsb/init-functions (Debian)
-is located in the main folder of the source files, called mbpfan.init.debian
-Rename it to mbpfan, give it execution permissions (chmod +x mbpfan)
-and move it to /etc/init.d
-Then, add it to the default runlevels with (as root):
+To turn RPM into percent:
 
-    sudo update-rc.d mbpfan defaults
+```
+(rpm - fan_min) * 100 / (fan_max - fan_min)
+```
 
-**Redhat, CentOS, Fedora**
-An init file suitable for /etc/rc.d/init.d/functions
-(RHEL/CentOS & Fedora) is also located at the same place, this file is called
-mbpfan.init.redhat. Also rename it to mbpfan, give it execution permissions
-and move it to /etc/init.d
-To add the script to the default runlevels, run the following as root:
+To try a fixed speed, set a flat curve, for example `curve = 0:20,100:20`,
+reload, and listen. Change the number until you find the speed you want,
+then build the real curve on top of it, raising the other points if they
+are lower.
 
-    chkconfig --level 2345 mbpfan on && chkconfig --level 016 mbpfan off
+To see what mbpfan does on each reading, run it by hand in verbose mode.
+Only one copy can run at a time, so stop the service first:
 
-**Gentoo**
+```
+sudo systemctl stop mbpfan
+sudo mbpfan -f -v
+# Ctrl+C when done
+sudo systemctl start mbpfan
+```
 
-To automatically run mbpfan at boot, run as root:
+Each reading then prints the raw and smoothed temperature, the curve
+target and the speed set for each fan.
 
-    rc-update add mbpfan default
+## Command line
 
+```
+Usage: mbpfan OPTION(S)
+Options:
+	-h Show this help screen
+	-f Run in foreground
+	-v Be (a lot) verbose
+```
 
-**systemd**
-The packages enable and start the service on first install.
-After `make install`, run this to start mbpfan now and at every boot:
+mbpfan needs root. Under systemd it logs to the journal.
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now mbpfan.service
+## Building from source
 
-**dinit**
-A [dinit](https://github.com/davmac314/dinit) service definition is also included. To use it, execute the following:
-    
-    sudo cp mbpfan.dinit /etc/dinit.d/mbpfan
-    sudo dinitctl enable mbpfan
-    sudo dinitctl start mbpfan
+To install from source, see [From source](#from-source). This section is
+about working on the code.
 
-## Usage
+```
+make
+```
 
-    Usage: ./mbpfan OPTION(S)
+This builds `bin/mbpfan` and the test program `bin/mbpfan-tests`. The tests
+use the real hardware, so they only run on a Mac with `coretemp` and
+`applesmc` loaded. Run them as root from the top of the repository, with
+`/etc/mbpfan.conf` in this fork's format. One test puts the CPU under load
+on purpose.
 
-    -h Show the help screen
-    -f Run in foreground
-    -v Be (a lot) verbose
+```
+sudo ./bin/mbpfan-tests
+```
 
-## References
-
-* [mbpfan on Ask Ubuntu](https://askubuntu.com/search?q=mbpfan+is%3Aquestion)
+CI builds every push but does not run the tests.
 
 ## License
 
-GNU General Public License version 3
+GNU General Public License version 3. See [COPYING](COPYING).
 
 ## Credits
 
-**This Project Is Based On:**
+This fork is maintained by Egor Taranov. It is built on
+[mbpfan](https://github.com/linux-on-mac/mbpfan) and the work of everyone
+listed in [AUTHORS](AUTHORS).
 
-* http://allanmcrae.com/2010/05/simple-macbook-pro-fan-daemon/
-* http://allanmcrae.com/2011/08/mbp-fan-daemon-update/
-* https://launchpad.net/macfanctld
-* https://www.lobotomo.com/products/FanControl/
+mbpfan itself is based on:
 
-**This Project uses following library:**
+- [Simple MacBook Pro fan daemon](http://allanmcrae.com/2010/05/simple-macbook-pro-fan-daemon/) and its [update](http://allanmcrae.com/2011/08/mbp-fan-daemon-update/) by Allan McRae
+- [macfanctld](https://launchpad.net/macfanctld)
+- [FanControl](https://www.lobotomo.com/products/FanControl/)
 
-* [ANSI C Application Settings Management](http://pokristensson.com/settings.html) by Per Ola Kristensson.
+Config parsing uses
+[ANSI C Application Settings Management](http://pokristensson.com/settings.html)
+by Per Ola Kristensson.
